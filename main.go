@@ -46,3 +46,14 @@ func dialer(fn handlerFunc, opts ...grpc.ServerOption) func(context.Context, str
 		return list.Dial()
 	}
 }
+
+// hello make the client grpc request
+func hello(ctx context.Context, dialer func(context.Context, string) (net.Conn, error)) (*pb.HelloReply, error) {
+	conn, err := grpc.DialContext(ctx, "", grpc.WithContextDialer(dialer), grpc.WithInsecure())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	client := pb.NewGreeterClient(conn)
+	return client.SayHello(ctx, &pb.HelloRequest{Name: "Hello"})
+}

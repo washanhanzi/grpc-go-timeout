@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"testing"
 	"time"
 
@@ -16,22 +15,64 @@ import (
 )
 
 // TestServerSideTimeout will set a 3 seconds timeout in server interceptor
+// but we are not dealing with the parent context timeout
 // [ref](https://github.com/grpc/grpc-go/issues/5059)
 func TestServerSideTimeout(t *testing.T) {
+	wait := func(ctx context.Context) (*pb.HelloReply, error) {
+		_, ok := ctx.Deadline()
+		//check deadline
+		if !ok {
+			t.Fatal("deadline should be set")
+		}
+		//the request will wait 5 seconds
+		time.Sleep(5 * time.Second)
+		return &pb.HelloReply{Message: "World"}, nil
+
+	}
+	//an unary interceptor to set server timeout for every request
+	timeoutInterceptor := func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+		defer cancel()
+		return handler(ctx, req)
+	}
+	interceptor := grpc.UnaryInterceptor(grpcmiddleware.ChainUnaryServer(timeoutInterceptor))
+	ctx := context.Background()
+	resp, err := hello(ctx, dialer(wait, interceptor))
+	if err != nil {
+		if v, ok := status.FromError(err); ok {
+			if v.Code() != codes.DeadlineExceeded {
+				t.Fatal(err)
+			}
+		} else {
+			t.Fatal(err)
+		}
+	}
+	//request should success
+	if resp.Message != "World" {
+		t.Fail()
+	}
+}
+
+// TestServerSideTimeoutWithEffort is same as TestServerSideTimeout
+// but we are dealing with the parent context timeout
+func TestServerSideTimeoutWithEffort(t *testing.T) {
 	//server will wait 5 seconds and timeout
 	wait := func(ctx context.Context) (*pb.HelloReply, error) {
-		// sleepCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		// defer cancel()
-		// select {
-		// //if you don't deal with the parent ctx timeout, the timeout is ignored
-		// case <-ctx.Done():
-		// 	return &pb.HelloReply{}, status.Error(codes.DeadlineExceeded, "server timeout")
-		// case <-sleepCtx.Done():
 		_, ok := ctx.Deadline()
-		log.Print(ok)
-		time.Sleep(5 * time.Second)
-		return &pb.HelloReply{Message: "world"}, nil
-
+		//check deadline
+		if !ok {
+			t.Fatal("deadline should be set")
+		}
+		//a 5 seconds operation
+		sleepCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		select {
+		//we are dealing with the server timeout
+		case <-ctx.Done():
+			return &pb.HelloReply{}, status.Error(codes.DeadlineExceeded, "server timeout")
+		case <-sleepCtx.Done():
+			return &pb.HelloReply{Message: "World"}, nil
+		}
 	}
 	timeoutInterceptor := func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 		ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
@@ -40,13 +81,7 @@ func TestServerSideTimeout(t *testing.T) {
 	}
 	interceptor := grpc.UnaryInterceptor(grpcmiddleware.ChainUnaryServer(timeoutInterceptor))
 	ctx := context.Background()
-	conn, err := grpc.DialContext(ctx, "", grpc.WithContextDialer(dialer(wait, interceptor)), grpc.WithInsecure())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	client := pb.NewGreeterClient(conn)
-	_, err = client.SayHello(ctx, &pb.HelloRequest{Name: "hello"})
+	_, err := hello(ctx, dialer(wait, interceptor))
 	if err != nil {
 		if v, ok := status.FromError(err); ok {
 			if v.Code() != codes.DeadlineExceeded {
@@ -56,7 +91,7 @@ func TestServerSideTimeout(t *testing.T) {
 			t.Fatal(err)
 		}
 	} else {
-		t.Fatal("request succeeded")
+		t.Fatal("request should timeout on server side")
 	}
 }
 
@@ -64,20 +99,18 @@ func TestServerSideTimeout(t *testing.T) {
 func TestClientSideTimeoutWithGoCtx(t *testing.T) {
 	//server will wait 5 seconds and make sure client will timeout
 	h := func(ctx context.Context) (*pb.HelloReply, error) {
+		//the client set deadline should be propagated to the request context
 		_, ok := ctx.Deadline()
-		log.Println(ok)
+		if !ok {
+			t.Fatal("deadline should be set")
+		}
+		//server will wait 5 seconds, but client's 1 second timeout should be triggered first
 		time.Sleep(5 * time.Second)
 		return &pb.HelloReply{Message: "world"}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	conn, err := grpc.DialContext(ctx, "", grpc.WithContextDialer(dialer(h)), grpc.WithInsecure(), grpc.WithBlock())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	client := pb.NewGreeterClient(conn)
-	_, err = client.SayHello(ctx, &pb.HelloRequest{Name: "hello"})
+	_, err := hello(ctx, dialer(h))
 	if err != nil {
 		if v, ok := status.FromError(err); ok {
 			if v.Code() != codes.DeadlineExceeded {
@@ -87,35 +120,23 @@ func TestClientSideTimeoutWithGoCtx(t *testing.T) {
 			t.Fatal(err)
 		}
 	} else {
-		t.Fatal("request succeeded")
+		t.Fatal("request should timeout on client side")
 	}
 
 }
 
-func TestClientSideTimeoutWithHeader(t *testing.T) {
-	//server will wait 5 seconds and make sure client will timeout
+// TestClientSideTimeoutWithMetadata will incorrectly set a timeout by client using metadata
+func TestClientSideTimeoutWithMetadata(t *testing.T) {
 	h := func(ctx context.Context) (*pb.HelloReply, error) {
-		md, ok := metadata.FromIncomingContext(ctx)
-		if !ok {
-			log.Println("haha")
+		_, ok := ctx.Deadline()
+		if ok {
+			t.Fatal("deadline should not exist")
 		}
-		log.Println(md)
-		d, ok := ctx.Deadline()
-		if !ok {
-			return &pb.HelloReply{}, status.Error(codes.InvalidArgument, "deadline not set")
-		}
-		log.Println(d)
 		time.Sleep(5 * time.Second)
 		return &pb.HelloReply{Message: "world"}, nil
 	}
 	ctx := metadata.AppendToOutgoingContext(context.Background(), "grpc-timeout", "1s")
-	conn, err := grpc.DialContext(ctx, "", grpc.WithContextDialer(dialer(h)), grpc.WithInsecure(), grpc.WithBlock())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	client := pb.NewGreeterClient(conn)
-	_, err = client.SayHello(ctx, &pb.HelloRequest{Name: "hello"})
+	resp, err := hello(ctx, dialer(h))
 	if err != nil {
 		if v, ok := status.FromError(err); ok {
 			if v.Code() != codes.DeadlineExceeded {
@@ -124,7 +145,9 @@ func TestClientSideTimeoutWithHeader(t *testing.T) {
 		} else {
 			t.Fatal(err)
 		}
-	} else {
-		t.Fatal("request succeeded")
+	}
+	//request should success
+	if resp.Message != "World" {
+		t.Fail()
 	}
 }
