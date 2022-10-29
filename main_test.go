@@ -95,8 +95,8 @@ func TestServerSideTimeoutWithEffort(t *testing.T) {
 	}
 }
 
-// TestClientSideTimeoutWithGoCtx will set a timeout(deadline) on client side
-func TestClientSideTimeoutWithGoCtx(t *testing.T) {
+// TestClientSideTimeout will set a timeout(deadline) on client side
+func TestClientSideTimeout(t *testing.T) {
 	//server will wait 5 seconds and make sure client will timeout
 	h := func(ctx context.Context) (*pb.HelloReply, error) {
 		//the client set deadline should be propagated to the request context
@@ -133,7 +133,7 @@ func TestClientSideTimeoutWithMetadata(t *testing.T) {
 			t.Fatal("deadline should not exist")
 		}
 		time.Sleep(5 * time.Second)
-		return &pb.HelloReply{Message: "world"}, nil
+		return &pb.HelloReply{Message: "World"}, nil
 	}
 	ctx := metadata.AppendToOutgoingContext(context.Background(), "grpc-timeout", "1s")
 	resp, err := hello(ctx, dialer(h))
